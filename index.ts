@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   CallToolResult,
   RootsListChangedNotificationSchema,
+  isInitializeRequest,
   type Root,
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs/promises";
@@ -219,12 +220,13 @@ const GetFileInfoArgsSchema = z.object({
   path: z.string(),
 });
 
-const server = new McpServer(
-  {
-    name: "secure-filesystem-server-readonly",
-    version: "0.3.0",
-  }
-);
+function createFilesystemMcpServer(): McpServer {
+  const server = new McpServer(
+    {
+      name: "secure-filesystem-server-readonly",
+      version: "0.3.0",
+    }
+  );
 
 // Reads a file as a stream of buffers, concatenates them, and then encodes
 // the result to a Base64 string. This is a memory-efficient way to handle
@@ -677,6 +679,9 @@ server.server.oninitialized = async () => {
   }
 };
 
+  return server;
+}
+
 // Constant-time API key comparison.
 function apiKeyMatches(expected: string, received: string): boolean {
   const a = Buffer.from(expected, 'utf-8');
@@ -711,11 +716,52 @@ function send401(res: http.ServerResponse, message: string): void {
   res.end(JSON.stringify({ error: message }));
 }
 
+// HTTP session helpers (one transport + MCP server per client session)
+
+type HttpSession = {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+};
+
+function getMcpSessionId(req: http.IncomingMessage): string | undefined {
+  const header = req.headers['mcp-session-id'];
+  if (typeof header === 'string' && header.length > 0) {
+    return header;
+  }
+  if (Array.isArray(header) && header.length > 0) {
+    return header[0];
+  }
+  return undefined;
+}
+
+async function readHttpBody(req: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(chunk as Buffer);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  if (raw.length === 0) {
+    return undefined;
+  }
+  return JSON.parse(raw) as unknown;
+}
+
+function sendJsonRpcBadRequest(res: http.ServerResponse, message: string): void {
+  res.statusCode = 400;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({
+    jsonrpc: '2.0',
+    error: { code: -32000, message },
+    id: null,
+  }));
+}
+
 // Start server (stdio or HTTP)
 
 async function runStdio(): Promise<void> {
+  const mcpServer = createFilesystemMcpServer();
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await mcpServer.connect(transport);
   console.error("Secure MCP Filesystem Server (read-only) running on stdio");
   if (allowedDirectories.length === 0) {
     console.error("Started without allowed directories - waiting for client to provide roots via MCP protocol");
@@ -723,15 +769,57 @@ async function runStdio(): Promise<void> {
 }
 
 async function runHttp(expectedKey: string, host: string, port: number): Promise<void> {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
+  const sessions = new Map<string, HttpSession>();
 
-  transport.onerror = (err) => {
-    console.error("HTTP transport error:", err instanceof Error ? err.message : String(err));
-  };
+  async function handleMcpHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const sessionId = getMcpSessionId(req);
+    let parsedBody: unknown;
 
-  await server.connect(transport);
+    if (req.method === 'POST') {
+      parsedBody = await readHttpBody(req);
+    }
+
+    const existing = sessionId ? sessions.get(sessionId) : undefined;
+    if (existing) {
+      await existing.transport.handleRequest(req, res, parsedBody);
+      return;
+    }
+
+    if (req.method === 'POST' && !sessionId && parsedBody !== undefined && isInitializeRequest(parsedBody)) {
+      const mcpServer = createFilesystemMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid) => {
+          sessions.set(sid, { transport, server: mcpServer });
+          console.error(`HTTP MCP session initialized: ${sid}`);
+        },
+      });
+
+      transport.onerror = (err) => {
+        console.error("HTTP transport error:", err instanceof Error ? err.message : String(err));
+      };
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) {
+          sessions.delete(sid);
+          console.error(`HTTP MCP session closed: ${sid}`);
+        }
+        void mcpServer.close().catch(() => { /* ignore */ });
+      };
+
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, parsedBody);
+      return;
+    }
+
+    if (req.method === 'GET' || req.method === 'DELETE') {
+      sendJsonRpcBadRequest(res, 'Invalid or missing session ID');
+      return;
+    }
+
+    sendJsonRpcBadRequest(res, 'Bad Request: No valid session ID provided');
+  }
 
   const httpServer = http.createServer(async (req, res) => {
     try {
@@ -744,7 +832,7 @@ async function runHttp(expectedKey: string, host: string, port: number): Promise
         send401(res, "Invalid API key.");
         return;
       }
-      await transport.handleRequest(req, res);
+      await handleMcpHttpRequest(req, res);
     } catch (err) {
       console.error("HTTP request error:", err instanceof Error ? err.message : String(err));
       if (!res.headersSent) {
@@ -774,7 +862,15 @@ async function runHttp(expectedKey: string, host: string, port: number): Promise
   const shutdown = async (signal: string) => {
     console.error(`Received ${signal}, shutting down HTTP server...`);
     httpServer.close();
-    try { await transport.close(); } catch { /* ignore */ }
+    for (const [sid, session] of sessions) {
+      try {
+        await session.transport.close();
+      } catch { /* ignore */ }
+      try {
+        await session.server.close();
+      } catch { /* ignore */ }
+      sessions.delete(sid);
+    }
     process.exit(0);
   };
   process.on('SIGINT', () => { void shutdown('SIGINT'); });

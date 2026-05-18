@@ -17,7 +17,7 @@
 .PARAMETER Port
     HTTP port to listen on. Defaults to 8787.
 
-.PARAMETER Host
+.PARAMETER BindHost
     HTTP bind address. Defaults to 127.0.0.1.
 
 .PARAMETER ApiKey
@@ -50,7 +50,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$Host = '127.0.0.1',
+    [string]$BindHost = '127.0.0.1',
 
     [Parameter()]
     [string]$ApiKey,
@@ -174,14 +174,14 @@ try {
     Write-Host " MCP filesystem server (read-only, HTTP mode)"                  -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Listening on:        http://$Host`:$Port"
+    Write-Host "Listening on:        http://${BindHost}:$Port"
     Write-Host "API key:             $ApiKey"
     Write-Host "Key saved to:        $keyFile (gitignored)"
     Write-Host "Allowed roots:"
     $resolvedRoots | ForEach-Object { Write-Host "  - $_" }
     Write-Host ""
     Write-Host "Expose this with Cloudflare Quick Tunnel (in a separate terminal):"
-    Write-Host "    cloudflared tunnel --url http://$Host`:$Port" -ForegroundColor Yellow
+    Write-Host "    cloudflared tunnel --url http://${BindHost}:$Port" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Then point GitHub Copilot / any MCP client at the printed *.trycloudflare.com URL"
     Write-Host "using one of these auth headers:"
@@ -205,7 +205,7 @@ try {
         $distIndex,
         '--http',
         '--port', $Port,
-        '--host', $Host,
+        '--host', $BindHost,
         '--api-key', $ApiKey
     ) + $resolvedRoots
 

@@ -210,6 +210,73 @@ cloudflared tunnel --url http://127.0.0.1:8787
 - The server **binds to `127.0.0.1` by default.** Do not bind to `0.0.0.0` unless you fully understand the consequences; the API key check is the only auth layer.
 - This server is *read-only* by construction — even if the key leaks, an attacker cannot modify files inside the allowed roots through MCP. They can, however, exfiltrate file contents.
 
+### Local-only (no tunnel)
+
+If GitHub Copilot / VS Code runs on the **same machine** as the server, skip `cloudflared` and point the client at localhost:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787",
+      "headers": {
+        "X-API-Key": "<contents of .mcp-api-key>"
+      }
+    }
+  }
+}
+```
+
+### Copilot: `Server already initialized` / `initialize` fails
+
+If the server log shows `HTTP transport error: Invalid Request: Server already initialized`, the client sent a second `initialize` on the same HTTP session. This server uses **one MCP session per client** (per the MCP Streamable HTTP spec): each new connection gets its own transport.
+
+After updating, **restart** `install.ps1` so `dist/` is rebuilt. Copilot must:
+
+1. Send the first `initialize` without an `Mcp-Session-Id` header.
+2. Read `Mcp-Session-Id` from the response headers.
+3. Send all later requests (including SSE `GET`) with that same `Mcp-Session-Id` header.
+
+If errors persist, use **localhost** in `mcp.json` (`http://127.0.0.1:8787`) instead of a tunnel while debugging.
+
+### Quick Tunnel troubleshooting
+
+If `cloudflared tunnel --url http://127.0.0.1:8787` fails with:
+
+```text
+Error unmarshaling QuickTunnel response: error code: 1101
+invalid character 'e' looking for beginning of value
+```
+
+that error comes from **Cloudflare's Quick Tunnel API** (`api.trycloudflare.com`), not from this MCP server. Your server is usually fine if `install.ps1` printed `listening on http://127.0.0.1:8787`.
+
+**Check the MCP server first** (replace with your key from `.\.mcp-api-key`):
+
+```powershell
+Invoke-WebRequest -Uri http://127.0.0.1:8787 -Method POST `
+  -Headers @{ "X-API-Key" = (Get-Content .\.mcp-api-key -Raw) } `
+  -Body '{}' -UseBasicParsing
+```
+
+You should **not** get `401 Unauthorized` when the key is correct.
+
+**Then fix Quick Tunnel:**
+
+1. **Wait and retry** — account-less Quick Tunnels are rate-limited; wait 15–60 minutes and try again.
+2. **Update `cloudflared`** — download the latest from the [Cloudflare downloads page](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+3. **Remove conflicting config** — if `%USERPROFILE%\.cloudflared\config.yaml` exists, temporarily rename that folder and retry.
+4. **Network / DNS** — VPN, corporate proxy, or ISP filtering can block `*.trycloudflare.com`; try another network.
+5. **Production alternative** — create a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) with a Cloudflare account (stable URL, no Quick Tunnel rate limits).
+
+**Alternative tunnel (ngrok):**
+
+```powershell
+ngrok http 8787
+```
+
+Use the printed `https://….ngrok-free.app` URL in `mcp.json` with the same `X-API-Key` header.
+
 ## Build
 
 ```bash
