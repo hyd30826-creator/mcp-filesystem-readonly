@@ -67,9 +67,12 @@ describe('structuredContent schema compliance', () => {
       // It should NOT be an array
       expect(Array.isArray(structuredContent.content)).toBe(false);
 
-      // The content should be valid JSON representing the tree
+      // The content should be valid JSON representing the wrapper object
       const treeData = JSON.parse(structuredContent.content as string);
-      expect(Array.isArray(treeData)).toBe(true);
+      expect(treeData).toHaveProperty('tree');
+      expect(treeData).toHaveProperty('truncated');
+      expect(treeData).toHaveProperty('totalIncluded');
+      expect(Array.isArray(treeData.tree)).toBe(true);
     });
   });
 

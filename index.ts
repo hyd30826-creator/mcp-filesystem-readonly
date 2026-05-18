@@ -207,7 +207,17 @@ const ListDirectoryWithSizesArgsSchema = z.object({
 
 const DirectoryTreeArgsSchema = z.object({
   path: z.string(),
-  excludePatterns: z.array(z.string()).optional().default([])
+  excludePatterns: z.array(z.string()).optional().default([]),
+  maxDepth: z.number().nullable().optional().default(5)
+    .describe("Max recursion depth (0 = root's children only). null = unlimited."),
+  maxNodes: z.number().nullable().optional().default(1000)
+    .describe("Max total entries (files + dirs). null = unlimited. Once hit, stop adding entries and mark truncated."),
+  maxOutputBytes: z.number().nullable().optional().default(200000)
+    .describe("Max serialized JSON bytes. null = unlimited. Backstop to prevent token-bombing."),
+  dirsOnly: z.boolean().optional().default(false)
+    .describe("If true, omit files from the tree (only directories)."),
+  compact: z.boolean().optional().default(true)
+    .describe("If true (default), use compact JSON (no indentation). If false, use 2-space indentation."),
 });
 
 const SearchFilesArgsSchema = z.object({
@@ -493,11 +503,23 @@ server.registerTool(
     description:
       "Get a recursive tree view of files and directories as a JSON structure. " +
       "Each entry includes 'name', 'type' (file/directory), and 'children' for directories. " +
-      "Files have no children array, while directories always have a children array (which may be empty). " +
-      "The output is formatted with 2-space indentation for readability. Only works within allowed directories.",
+      "Returns { tree, truncated, totalIncluded } with optional reason/hint when truncated. " +
+      "Defaults: maxDepth=5, maxNodes=1000, maxOutputBytes=200KB, compact=true. " +
+      "For large directories, narrow the path or use excludePatterns. " +
+      "Set dirsOnly=true to omit files. Only works within allowed directories.",
     inputSchema: {
       path: z.string(),
-      excludePatterns: z.array(z.string()).optional().default([])
+      excludePatterns: z.array(z.string()).optional().default([]),
+      maxDepth: z.number().nullable().optional().default(5)
+        .describe("Max recursion depth (0 = root's children only). null = unlimited."),
+      maxNodes: z.number().nullable().optional().default(1000)
+        .describe("Max total entries (files + dirs). null = unlimited. Once hit, stop adding entries and mark truncated."),
+      maxOutputBytes: z.number().nullable().optional().default(200000)
+        .describe("Max serialized JSON bytes. null = unlimited. Backstop to prevent token-bombing."),
+      dirsOnly: z.boolean().optional().default(false)
+        .describe("If true, omit files from the tree (only directories)."),
+      compact: z.boolean().optional().default(true)
+        .describe("If true (default), use compact JSON (no indentation). If false, use 2-space indentation."),
     },
     outputSchema: { content: z.string() },
     annotations: { readOnlyHint: true }
@@ -509,13 +531,28 @@ server.registerTool(
       children?: TreeEntry[];
     }
     const rootPath = args.path;
+    const maxDepth = args.maxDepth;
+    const maxNodes = args.maxNodes;
+    const maxOutputBytes = args.maxOutputBytes;
+    const dirsOnly = args.dirsOnly;
+    const compact = args.compact;
 
-    async function buildTree(currentPath: string, excludePatterns: string[] = []): Promise<TreeEntry[]> {
+    const counter = { count: 0 };
+    let truncated = false;
+    let truncationReason: string | undefined;
+
+    async function buildTree(
+      currentPath: string,
+      excludePatterns: string[],
+      depth: number
+    ): Promise<TreeEntry[]> {
       const validPath = await validatePath(currentPath);
       const entries = await fs.readdir(validPath, { withFileTypes: true });
       const result: TreeEntry[] = [];
 
       for (const entry of entries) {
+        if (truncated) break;
+
         const relativePath = path.relative(rootPath, path.join(currentPath, entry.name));
         const shouldExclude = excludePatterns.some(pattern => {
           if (pattern.includes('*')) {
@@ -528,14 +565,29 @@ server.registerTool(
         if (shouldExclude)
           continue;
 
+        if (dirsOnly && !entry.isDirectory())
+          continue;
+
+        if (maxNodes !== null && counter.count >= maxNodes) {
+          truncated = true;
+          truncationReason = "maxNodes";
+          break;
+        }
+
+        counter.count++;
+
         const entryData: TreeEntry = {
           name: entry.name,
           type: entry.isDirectory() ? 'directory' : 'file'
         };
 
         if (entry.isDirectory()) {
-          const subPath = path.join(currentPath, entry.name);
-          entryData.children = await buildTree(subPath, excludePatterns);
+          if (maxDepth !== null && depth >= maxDepth) {
+            entryData.children = [];
+          } else {
+            const subPath = path.join(currentPath, entry.name);
+            entryData.children = await buildTree(subPath, excludePatterns, depth + 1);
+          }
         }
 
         result.push(entryData);
@@ -544,8 +596,47 @@ server.registerTool(
       return result;
     }
 
-    const treeData = await buildTree(rootPath, args.excludePatterns);
-    const text = JSON.stringify(treeData, null, 2);
+    const treeData = await buildTree(rootPath, args.excludePatterns, 0);
+
+    type TreeResult = {
+      tree: TreeEntry[];
+      truncated: boolean;
+      totalIncluded: number;
+      reason?: string;
+      hint?: string;
+    };
+
+    let result: TreeResult;
+    if (truncated) {
+      result = {
+        tree: treeData,
+        truncated: true,
+        totalIncluded: counter.count,
+        reason: truncationReason!,
+        hint: "Narrow the path, add excludePatterns, or increase maxNodes/maxOutputBytes to see more.",
+      };
+    } else {
+      result = {
+        tree: treeData,
+        truncated: false,
+        totalIncluded: counter.count,
+      };
+    }
+
+    let text = compact ? JSON.stringify(result) : JSON.stringify(result, null, 2);
+
+    if (maxOutputBytes !== null && Buffer.byteLength(text, 'utf8') > maxOutputBytes) {
+      result.truncated = true;
+      result.reason = "maxOutputBytes";
+      result.hint = "Narrow the path, add excludePatterns, or increase maxNodes/maxOutputBytes to see more.";
+      text = compact ? JSON.stringify(result) : JSON.stringify(result, null, 2);
+      if (Buffer.byteLength(text, 'utf8') > maxOutputBytes) {
+        result.tree = [];
+        result.totalIncluded = 0;
+        text = compact ? JSON.stringify(result) : JSON.stringify(result, null, 2);
+      }
+    }
+
     const contentBlock = { type: "text" as const, text };
     return {
       content: [contentBlock],

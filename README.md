@@ -60,10 +60,16 @@ Clients that support roots can replace the allowlist dynamically at initializati
     - `sortBy` (string, optional, `"name"` or `"size"`, default `"name"`)
 
 - **directory_tree**
-  - Recursive JSON tree of files/directories
+  - Recursive JSON tree of files/directories with safeguards against token-bombing
+  - Returns `{ tree, truncated, totalIncluded }` with optional `reason`/`hint` when truncated
   - Inputs:
     - `path` (string)
     - `excludePatterns` (string[], optional, glob)
+    - `maxDepth` (number | null, optional, default `5`) — max recursion depth (0 = root's children only, `null` = unlimited)
+    - `maxNodes` (number | null, optional, default `1000`) — max total entries (files + dirs); once hit, stops and marks truncated
+    - `maxOutputBytes` (number | null, optional, default `200000`) — max serialized JSON bytes; backstop to prevent huge responses
+    - `dirsOnly` (boolean, optional, default `false`) — if true, omit files (only directories)
+    - `compact` (boolean, optional, default `true`) — if true, compact JSON; if false, 2-space indented
 
 - **search_files**
   - Recursive glob-style search
