@@ -1,0 +1,32 @@
+{
+  "name": "mcp-filesystem-readonly",
+  "version": "0.3.0",
+  "description": "Hardened read-only MCP filesystem server with stdio and HTTP (API key) transports",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mcp-filesystem-readonly": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && shx chmod +x dist/*.js",
+    "prepare": "npm run build",
+    "watch": "tsc --watch",
+    "test": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "glob": "^10.5.0",
+    "minimatch": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/minimatch": "^5.1.2",
+    "@types/node": "^22",
+    "@vitest/coverage-v8": "^2.1.8",
+    "shx": "^0.3.4",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.8"
+  }
+}
