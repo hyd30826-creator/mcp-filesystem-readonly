@@ -252,9 +252,9 @@ const ReadDocumentArgsSchema = z.object({
   path: z.string(),
   sheets: z.array(z.string()).optional()
     .describe("XLSX only: filter to specific sheets by name or 0-indexed position (as a string, e.g. \"0\"). Default: all sheets."),
-  maxPages: z.number().int().positive().optional()
+  maxPages: z.number().optional()
     .describe("PDF only: render at most N pages from the start. Default: all pages."),
-  maxChars: z.number().int().nonnegative().optional()
+  maxChars: z.number().optional()
     .describe("Cap extracted text at N characters. Default: 500000. 0 = unlimited."),
 });
 
@@ -263,7 +263,7 @@ const ReadDocumentsArgsSchema = z.object({
     .array(z.string())
     .min(1, "At least one file path must be provided")
     .describe("Array of document file paths to extract. Each path must be a string pointing to a valid file within allowed directories."),
-  maxCharsPerFile: z.number().int().nonnegative().optional()
+  maxCharsPerFile: z.number().optional()
     .describe("Cap extracted text per file at N characters. Default: 200000. 0 = unlimited."),
 });
 
@@ -470,10 +470,10 @@ server.registerTool(
       path: z.string(),
       sheets: z.array(z.string()).optional()
         .describe("XLSX only: filter to specific sheets by name or 0-indexed position (as a string, e.g. \"0\"). Default: all sheets."),
-      maxPages: z.number().int().positive().optional()
-        .describe("PDF only: render at most N pages from the start. Default: all pages."),
-      maxChars: z.number().int().nonnegative().optional()
-        .describe("Cap extracted text at N characters. Default: 500000. 0 = unlimited."),
+      maxPages: z.number().optional()
+        .describe("PDF only: render at most N pages from the start. Must be a positive integer. Default: all pages."),
+      maxChars: z.number().optional()
+        .describe("Cap extracted text at N characters. Must be a non-negative integer. Default: 500000. 0 = unlimited."),
     },
     outputSchema: { content: z.string() },
     annotations: { readOnlyHint: true }
@@ -511,8 +511,8 @@ server.registerTool(
       paths: z.array(z.string())
         .min(1)
         .describe("Array of document file paths to extract."),
-      maxCharsPerFile: z.number().int().nonnegative().optional()
-        .describe("Cap extracted text per file at N characters. Default: 200000. 0 = unlimited."),
+      maxCharsPerFile: z.number().optional()
+        .describe("Cap extracted text per file at N characters. Must be a non-negative integer. Default: 200000. 0 = unlimited."),
     },
     outputSchema: { content: z.string() },
     annotations: { readOnlyHint: true }
