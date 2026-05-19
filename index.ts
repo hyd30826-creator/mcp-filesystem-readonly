@@ -250,8 +250,8 @@ const GetFileInfoArgsSchema = z.object({
 
 const ReadDocumentArgsSchema = z.object({
   path: z.string(),
-  sheets: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional()
-    .describe("XLSX only: filter to specific sheets by name (string) or 0-indexed position (number). Default: all sheets."),
+  sheets: z.array(z.string()).optional()
+    .describe("XLSX only: filter to specific sheets by name or 0-indexed position (as a string, e.g. \"0\"). Default: all sheets."),
   maxPages: z.number().int().positive().optional()
     .describe("PDF only: render at most N pages from the start. Default: all pages."),
   maxChars: z.number().int().nonnegative().optional()
@@ -468,38 +468,32 @@ server.registerTool(
       "Only works within allowed directories.",
     inputSchema: {
       path: z.string(),
-      sheets: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional()
-        .describe("XLSX only: filter to specific sheets by name (string) or 0-indexed position (number). Default: all sheets."),
+      sheets: z.array(z.string()).optional()
+        .describe("XLSX only: filter to specific sheets by name or 0-indexed position (as a string, e.g. \"0\"). Default: all sheets."),
       maxPages: z.number().int().positive().optional()
         .describe("PDF only: render at most N pages from the start. Default: all pages."),
       maxChars: z.number().int().nonnegative().optional()
         .describe("Cap extracted text at N characters. Default: 500000. 0 = unlimited."),
     },
-    outputSchema: {
-      text: z.string(),
-      detectedType: z.string(),
-      truncated: z.boolean(),
-      meta: z.record(z.string(), z.unknown()),
-    },
+    outputSchema: { content: z.string() },
     annotations: { readOnlyHint: true }
   },
   async (args: z.infer<typeof ReadDocumentArgsSchema>) => {
     const validPath = await validatePath(args.path);
     const { extractDocument } = await loadDocumentExtractor();
+    const sheets = args.sheets?.map((s) => {
+      const n = Number(s);
+      return Number.isInteger(n) && n >= 0 ? n : s;
+    });
     const result = await extractDocument(validPath, {
-      sheets: args.sheets,
+      sheets,
       maxPages: args.maxPages,
       maxChars: args.maxChars,
     });
     const display = formatDocumentDisplay(args.path, result);
     return {
       content: [{ type: "text" as const, text: display }],
-      structuredContent: {
-        text: result.text,
-        detectedType: result.detectedType,
-        truncated: result.truncated,
-        meta: result.meta,
-      },
+      structuredContent: { content: display },
     };
   }
 );
