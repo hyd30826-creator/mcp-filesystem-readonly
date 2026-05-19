@@ -28,6 +28,24 @@ import {
   headFile,
   setAllowedDirectories,
 } from './lib.js';
+import type { ExtractResult } from './document-extract.js';
+
+// Cache the document-extract module after the first call so we only pay the
+// heavy parser-library load cost (mammoth, exceljs, pdf-parse, msgreader) on
+// first use of read_document/read_documents instead of at server startup.
+type DocExtractModule = typeof import('./document-extract.js');
+let _docExtractor: DocExtractModule | undefined;
+async function loadDocumentExtractor(): Promise<DocExtractModule> {
+  _docExtractor ??= await import('./document-extract.js');
+  return _docExtractor;
+}
+
+// Kept in sync with EXT_TO_KIND in document-extract.ts. Hardcoded here so the
+// tool description renders without loading the heavy parsers.
+const SUPPORTED_DOCUMENT_EXTENSIONS = [
+  '.docx', '.xlsx', '.pdf', '.msg',
+  '.txt', '.csv', '.md', '.markdown', '.log', '.json', '.xml', '.html', '.htm',
+] as const;
 
 // CLI parsing
 
@@ -230,6 +248,25 @@ const GetFileInfoArgsSchema = z.object({
   path: z.string(),
 });
 
+const ReadDocumentArgsSchema = z.object({
+  path: z.string(),
+  sheets: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional()
+    .describe("XLSX only: filter to specific sheets by name (string) or 0-indexed position (number). Default: all sheets."),
+  maxPages: z.number().int().positive().optional()
+    .describe("PDF only: render at most N pages from the start. Default: all pages."),
+  maxChars: z.number().int().nonnegative().optional()
+    .describe("Cap extracted text at N characters. Default: 500000. 0 = unlimited."),
+});
+
+const ReadDocumentsArgsSchema = z.object({
+  paths: z
+    .array(z.string())
+    .min(1, "At least one file path must be provided")
+    .describe("Array of document file paths to extract. Each path must be a string pointing to a valid file within allowed directories."),
+  maxCharsPerFile: z.number().int().nonnegative().optional()
+    .describe("Cap extracted text per file at N characters. Default: 200000. 0 = unlimited."),
+});
+
 function createFilesystemMcpServer(): McpServer {
   const server = new McpServer(
     {
@@ -285,12 +322,14 @@ server.registerTool(
   {
     title: "Read Text File",
     description:
-      "Read the complete contents of a file from the file system as text. " +
+      "Read the complete contents of a file from the file system as raw UTF-8 text. " +
       "Handles various text encodings and provides detailed error messages " +
       "if the file cannot be read. Use this tool when you need to examine " +
-      "the contents of a single file. Use the 'head' parameter to read only " +
+      "the contents of a single plain-text file. Use the 'head' parameter to read only " +
       "the first N lines of a file, or the 'tail' parameter to read only " +
-      "the last N lines of a file. Operates on the file as text regardless of extension. " +
+      "the last N lines of a file. Operates on the file as text regardless of extension - " +
+      "for Office documents (.docx, .xlsx), PDFs, or Outlook .msg files, use read_document " +
+      "instead, since this tool will return their raw binary content as garbled UTF-8. " +
       "Only works within allowed directories.",
     inputSchema: {
       path: z.string(),
@@ -390,6 +429,119 @@ server.registerTool(
     return {
       content: [{ type: "text" as const, text }],
       structuredContent: { content: text }
+    };
+  }
+);
+
+const formatDocumentDisplay = (filePath: string, r: ExtractResult): string => {
+  const header: string[] = [`# ${filePath} (${r.detectedType})`];
+  if (r.truncated) header.push("Truncated: yes");
+  const metaEntries = Object.entries(r.meta);
+  if (metaEntries.length > 0) {
+    for (const [k, v] of metaEntries) {
+      let rendered: string;
+      if (v === null || v === undefined) rendered = "";
+      else if (typeof v === 'string') rendered = v;
+      else if (typeof v === 'number' || typeof v === 'boolean') rendered = String(v);
+      else {
+        try { rendered = JSON.stringify(v); } catch { rendered = ""; }
+      }
+      header.push(`${k}: ${rendered}`);
+    }
+  }
+  return `${header.join("\n")}\n\n${r.text}`;
+};
+
+server.registerTool(
+  "read_document",
+  {
+    title: "Read Document",
+    description:
+      "Extract readable text from a document file. Auto-detects format by extension and uses " +
+      "the appropriate parser for .docx (Word), .xlsx (Excel), .pdf, and .msg (Outlook). " +
+      "Plain-text formats (.txt, .csv, .md, .log, .json, .xml, .html) are returned verbatim. " +
+      "Prefer this over read_text_file for any Office document, PDF, or .msg file - those come " +
+      "back as garbled binary through read_text_file. " +
+      "Returns the extracted text plus structured metadata (sheet names for XLSX, page count " +
+      "for PDF, email headers and attachment list for MSG, mammoth warnings for DOCX). " +
+      `Supported extensions: ${SUPPORTED_DOCUMENT_EXTENSIONS.join(", ")}. ` +
+      "Only works within allowed directories.",
+    inputSchema: {
+      path: z.string(),
+      sheets: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional()
+        .describe("XLSX only: filter to specific sheets by name (string) or 0-indexed position (number). Default: all sheets."),
+      maxPages: z.number().int().positive().optional()
+        .describe("PDF only: render at most N pages from the start. Default: all pages."),
+      maxChars: z.number().int().nonnegative().optional()
+        .describe("Cap extracted text at N characters. Default: 500000. 0 = unlimited."),
+    },
+    outputSchema: {
+      text: z.string(),
+      detectedType: z.string(),
+      truncated: z.boolean(),
+      meta: z.record(z.string(), z.unknown()),
+    },
+    annotations: { readOnlyHint: true }
+  },
+  async (args: z.infer<typeof ReadDocumentArgsSchema>) => {
+    const validPath = await validatePath(args.path);
+    const { extractDocument } = await loadDocumentExtractor();
+    const result = await extractDocument(validPath, {
+      sheets: args.sheets,
+      maxPages: args.maxPages,
+      maxChars: args.maxChars,
+    });
+    const display = formatDocumentDisplay(args.path, result);
+    return {
+      content: [{ type: "text" as const, text: display }],
+      structuredContent: {
+        text: result.text,
+        detectedType: result.detectedType,
+        truncated: result.truncated,
+        meta: result.meta,
+      },
+    };
+  }
+);
+
+server.registerTool(
+  "read_documents",
+  {
+    title: "Read Multiple Documents",
+    description:
+      "Extract text from multiple document files in a single call. Each path is parsed with the " +
+      "same format detection as read_document. Failures on individual files are reported inline " +
+      "without aborting the rest of the batch. Useful for analyzing several Office documents, " +
+      "PDFs, or .msg files together. Only works within allowed directories.",
+    inputSchema: {
+      paths: z.array(z.string())
+        .min(1)
+        .describe("Array of document file paths to extract."),
+      maxCharsPerFile: z.number().int().nonnegative().optional()
+        .describe("Cap extracted text per file at N characters. Default: 200000. 0 = unlimited."),
+    },
+    outputSchema: { content: z.string() },
+    annotations: { readOnlyHint: true }
+  },
+  async (args: z.infer<typeof ReadDocumentsArgsSchema>) => {
+    const perFileCap = args.maxCharsPerFile ?? 200_000;
+    const { extractDocument } = await loadDocumentExtractor();
+    const blocks = await Promise.all(
+      args.paths.map(async (filePath: string) => {
+        try {
+          const validPath = await validatePath(filePath);
+          const result = await extractDocument(validPath, { maxChars: perFileCap });
+          return formatDocumentDisplay(filePath, result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return `# ${filePath} (error)\n${message}`;
+        }
+      }),
+    );
+    const text = blocks.join("\n\n---\n\n");
+    return {
+      content: [{ type: "text" as const, text }],
+      structuredContent: { content: text },
     };
   }
 );

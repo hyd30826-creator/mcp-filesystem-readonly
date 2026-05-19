@@ -7,6 +7,7 @@ Node.js server implementing the Model Context Protocol (MCP) for *read-only* fil
 ## Features
 
 - Read files (`read_text_file`, `read_media_file`, `read_multiple_files`)
+- Extract text from Office documents, PDFs, and Outlook `.msg` files (`read_document`, `read_documents`)
 - List / search directories (`list_directory`, `list_directory_with_sizes`, `directory_tree`, `search_files`)
 - Get file metadata (`get_file_info`)
 - Show the configured allowlist (`list_allowed_directories`)
@@ -31,12 +32,13 @@ Clients that support roots can replace the allowlist dynamically at initializati
 ### Tools
 
 - **read_text_file**
-  - Read complete contents of a file as text
+  - Read complete contents of a file as raw UTF-8 text
   - Inputs:
     - `path` (string)
     - `head` (number, optional): First N lines
     - `tail` (number, optional): Last N lines
   - Always treats the file as UTF-8 text regardless of extension
+  - For Office documents, PDFs, and `.msg` files use **`read_document`** instead — those come back as garbled binary through this tool
   - Cannot specify both `head` and `tail` simultaneously
 
 - **read_media_file**
@@ -48,6 +50,33 @@ Clients that support roots can replace the allowlist dynamically at initializati
   - Read multiple files simultaneously
   - Input: `paths` (string[])
   - Failed reads for individual files don't stop the operation
+
+- **read_document**
+  - Extract readable text from a document, auto-detecting the format by extension
+  - Inputs:
+    - `path` (string)
+    - `sheets` (Array<string | number>, optional) — XLSX only: filter to specific sheets by name or 0-indexed position. Default: all sheets
+    - `maxPages` (number, optional) — PDF only: render at most N pages from the start. Default: all pages
+    - `maxChars` (number, optional) — cap extracted text at N characters. Default `500000`; `0` = unlimited
+  - Supported extensions and the parser used:
+
+    | Extension(s)                     | Parser                | Output                                  |
+    |----------------------------------|-----------------------|-----------------------------------------|
+    | `.docx`                          | `mammoth`             | Plain text from paragraphs              |
+    | `.xlsx`                          | `exceljs`             | Per-sheet CSV blocks (`# Sheet: name`)  |
+    | `.pdf`                           | `pdf-parse`           | Embedded text layer                     |
+    | `.msg`                           | `@kenjiuno/msgreader` | `From/To/Cc/Subject/Date` + body + attachments |
+    | `.txt`, `.csv`, `.md`, `.markdown`, `.log`, `.json`, `.xml`, `.html`, `.htm` | native | Verbatim UTF-8 (BOM stripped) |
+
+  - Returns `{ text, detectedType, truncated, meta }`. `meta` includes sheet names (XLSX), page count and `hasExtractableText` (PDF), subject / from / attachment list (MSG), or mammoth warnings (DOCX)
+  - Image-only/scanned PDFs return empty text with `meta.hasExtractableText: false` — they have no embedded text layer and need OCR (out of scope here)
+
+- **read_documents**
+  - Run `read_document` over a batch of paths in one call
+  - Inputs:
+    - `paths` (string[]) — must be non-empty
+    - `maxCharsPerFile` (number, optional) — per-file text cap. Default `200000`; `0` = unlimited
+  - Failures on individual files are reported inline (`# <path> (error)\n<message>`) and do not abort the batch
 
 - **list_directory**
   - List directory contents with `[FILE]` or `[DIR]` prefixes
@@ -95,6 +124,8 @@ Every tool exposes [MCP ToolAnnotations](https://modelcontextprotocol.io/specifi
 | `read_text_file`            | `true`       | –              | –               |
 | `read_media_file`           | `true`       | –              | –               |
 | `read_multiple_files`       | `true`       | –              | –               |
+| `read_document`             | `true`       | –              | –               |
+| `read_documents`            | `true`       | –              | –               |
 | `list_directory`            | `true`       | –              | –               |
 | `list_directory_with_sizes` | `true`       | –              | –               |
 | `directory_tree`            | `true`       | –              | –               |
