@@ -232,8 +232,8 @@ const DirectoryTreeArgsSchema = z.object({
     .describe("Max total entries (files + dirs). null = unlimited. Once hit, stop adding entries and mark truncated."),
   maxOutputBytes: z.number().nullable().optional().default(200000)
     .describe("Max serialized JSON bytes. null = unlimited. Backstop to prevent token-bombing."),
-  dirsOnly: z.boolean().optional().default(false)
-    .describe("If true, omit files from the tree (only directories)."),
+  dirsOnly: z.boolean().optional().default(true)
+    .describe("If true (default), omit files (directories only). Set false to include files in the tree."),
   compact: z.boolean().optional().default(true)
     .describe("If true (default), use compact JSON (no indentation). If false, use 2-space indentation."),
 });
@@ -647,12 +647,13 @@ server.registerTool(
   {
     title: "Directory Tree",
     description:
-      "Get a recursive tree view of files and directories as a JSON structure. " +
-      "Each entry includes 'name', 'type' (file/directory), and 'children' for directories. " +
+      "Get a recursive tree view of the filesystem as JSON. " +
+      "Default (dirsOnly=true): directories only — a compact layout map. " +
+      "Set dirsOnly=false to include files (names and types) under each folder. " +
+      "Each entry has 'name', 'type' (file/directory), and 'children' for directories. " +
       "Returns { tree, truncated, totalIncluded } with optional reason/hint when truncated. " +
-      "Defaults: maxDepth=5, maxNodes=1000, maxOutputBytes=200KB, compact=true. " +
-      "For large directories, narrow the path or use excludePatterns. " +
-      "Set dirsOnly=true to omit files. Only works within allowed directories.",
+      "Defaults: dirsOnly=true, maxDepth=5, maxNodes=1000, maxOutputBytes=200KB, compact=true. " +
+      "For large trees, narrow path, use excludePatterns, or raise limits. Only works within allowed directories.",
     inputSchema: {
       path: z.string(),
       excludePatterns: z.array(z.string()).optional().default([]),
@@ -662,8 +663,8 @@ server.registerTool(
         .describe("Max total entries (files + dirs). null = unlimited. Once hit, stop adding entries and mark truncated."),
       maxOutputBytes: z.number().nullable().optional().default(200000)
         .describe("Max serialized JSON bytes. null = unlimited. Backstop to prevent token-bombing."),
-      dirsOnly: z.boolean().optional().default(false)
-        .describe("If true, omit files from the tree (only directories)."),
+      dirsOnly: z.boolean().optional().default(true)
+        .describe("If true (default), omit files (directories only). Set false to include files in the tree."),
       compact: z.boolean().optional().default(true)
         .describe("If true (default), use compact JSON (no indentation). If false, use 2-space indentation."),
     },
